@@ -1,0 +1,154 @@
+---
+title: "scRNA_analysis_pipeline"
+author: "Jackie Yang"
+date: 2022-01-26
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+NOTE: This pipeline starts from count matrices obtained from `cellranger count` or other programs, and delineates major analysis components for scRNA-seq data. The order and selection of modules may be different for different samples/projects. You may look up the specific packages to get more info.
+
+# Per-sample processing
+
+## Ambient RNA removal
+
+There are three modes of SoupX worth trying out:
+1. Automatic detection of genes not expressed in certain clusters;
+2. Fixed contamination rate threshold, e.g., 10%, 20%;
+3. Manual marker specification, e.g., if red blood cell lysis buffer is used for library preparation, hemoglobin genes can be used to estimate contamination rate.
+
+```{r soupx}
+library(SoupX)
+# auto
+temp.df <- autoEstCont(temp.df)
+# fixed
+temp.df <- setContaminationFraction(temp.df, temp.threshold)
+# manual (mouse markers)
+hbGenes <- c("Hbb-bt", "Hbb-bs", "Hbb-bh2", "Hbb-bh1", "Hbb-y", "Hba-x", "Hba-a1", "Hba-a2")
+igGenes <- c("Igha", "Ighe", "Ighg2c", "Ighg2b", "Ighg1", "Ighg3", "Ighd", "Ighm", "Ighj4", "Ighj3", "Ighj2", "Ighj1")
+nonExpressedGeneList <- list(HB = hbGenes, IG = igGenes)
+useToEst <- estimateNonExpressingCells(temp.df, nonExpressedGeneList = nonExpressedGeneList, clusters = FALSE)
+## desirable to be aggresive: not using clustering info
+temp.df <- calculateContaminationFraction(temp.df, nonExpressedGeneList, useToEst = useToEst)
+```
+Determine the mode to use based on marker gene expression after soupx, e.g., hemoglobin genes.
+
+## Filtering out bad-quality cells
+
+1. Gene number lower and upper thresholds based on its distribution (cells with too many genes expressed could be doublets);
+2. Molecule number lower threshold based on its distribution;
+3. Mitochondrial reads upper thresholds, e.g., 5%, 10% (cells with high % of mito reads might be apoptotic)
+4. (optional) cycling cells with e.g., Mki67 expression, this blog post may be helpful<https://constantamateur.github.io/2020-10-24-scBatch2/>
+
+```{r seurat}
+library(Seurat)
+temp.df <- subset(temp.df, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & nCount_RNA > 500 & percent.mt < 10)
+temp.df <- subset(temp.df, subset = Mki67 == 0)
+```
+
+## Removing potential doublets
+
+```{r doubletfinder}
+library(DoubletFinder)
+## pK Identification (no ground-truth)
+temp.sweep.res.list <- paramSweep_v3(temp.df, PCs = 1:20, sct = TRUE)
+temp.sweep.stats <- summarizeSweep(temp.sweep.res.list, GT = FALSE)
+temp.bcmvn <- find.pK(temp.sweep.stats)
+temp.pK_value <- as.numeric(as.character(temp.bcmvn$pK[temp.bcmvn$BCmetric == max(temp.bcmvn$BCmetric)]))
+## Homotypic Doublet Proportion Estimate
+temp.homotypic.prop <- modelHomotypic(temp.df$seurat_clusters)
+temp.nExp_poi <- round(0.031*ncol(temp.df)) # 0.031 is usually for 10x data
+temp.nExp_poi.adj <- round(temp.nExp_poi*(1-temp.homotypic.prop))
+## Run DoubletFinder with varying classification stringencies
+temp.pN_value <- 0.25
+temp.pANN_value <- paste0("pANN_",temp.pN_value,"_",temp.pK_value,'_',temp.nExp_poi)
+temp.df <- doubletFinder_v3(temp.df, PCs = 1:20, pN = temp.pN_value, pK = temp.pK_value, nExp = temp.nExp_poi, reuse.pANN = FALSE, sct = TRUE) # sct = TRUE is data is normalized using SCTransform from Seurat
+temp.df <- doubletFinder_v3(temp.df, PCs = 1:20, pN = temp.pN_value, pK = temp.pK_value, nExp = temp.nExp_poi.adj, reuse.pANN = temp.pANN_value, sct = TRUE)
+```
+
+# All samples
+
+## Sample filtering based on pseudobulk profiles
+
+```{r pseudobulk}
+temp.bulk <- as.data.frame(Matrix::rowMeans(temp.df@assays$RNA))
+```
+
+## Merge samples together
+
+Refer to Nature Communication "The art of using t-SNE for single-cell transcriptomics" for effective preprocessing and processing steps. Some of their suggestions are included in the fancy_tsne.R script
+
+```{r merge}
+temp.all <- cbind(temp.all, temp.df@assays$RNA@counts)
+temp.combined <- CreateSeuratObject(counts = temp.all, project = "XXX", min.cells = round(0.001 * ncol(temp.all)))
+temp.combined <- fancy_tsne(temp.combined, TRUE, FALSE, "mouse", "regular", TRUE, 16)
+# refer to fancy_tsne.R for arguments
+# Use n>>100,000 as the cutoff to determine very large data sets
+```
+
+## Visualize phenotypic variables on the merged UMAP or tSNE and determine if there is batch effect
+
+<https://constantamateur.github.io/2020-06-09-scBatch1/><<https://constantamateur.github.io/2020-10-24-scBatch2/> these two posts could help you understand the logic behind batch effect removal.
+
+There are several packages for this purpose (some are more time-consuming than others), e.g., Seurat, Harmony, Liger
+
+```{r batch}
+library(Seurat) # reciprocal PCA
+library(liger)
+library(harmony)
+```
+
+## Cell type annotation
+
+I usually use a combination of automatic and manual annotation. The tools I used for automatic annotation are SciBet and SingleR, both of which provide per-cell annotation. SciBet uses references from other single-cell studies. SingleR relies more on microarray and bulk RNA-seq studies. None of the tools is perfect. They just give you a rough idea of the clusters, especially when you do not have good references for integration-based annotation. Visualizing canonical marker gene expression and manual cell type annotation are always helpful, but to different extent for different projects.
+
+```{r anno}
+library(scibet)
+library(SingleR)
+# cross-referencing hierachical and density clustering results at different resolutions usually helps with annotation
+library(BiocNeighbors)
+library(ape)
+library(dbscan)
+# sub-clustering of a certain cell type could yield cells belonging to a different cell type, but usually very few if all the previous QC steps are done
+```
+
+# Downstream analysis
+
+## Differentially expressed genes (DEGs)
+
+If samples are relatively homogeneous, like mouse samples, methods provided by Seurat, e.g., wilcox and logstic regression, will give reliable DEGs. If you are analyzing human samples, mixed effect models would work better, e.g., NEBULA<https://www.biorxiv.org/content/10.1101/2020.09.24.311662v1> developed by a previous postdoc Liang He. Shahin, a previous postdoc, and Sebastian, a PhD student, in the lab are working on a inverse-weighted multiresolution pseudobulk method.
+
+<https://constantamateur.github.io/2020-04-10-scDE/>
+
+```{r deg}
+library(nebula)
+library(ACTIONet) # Shahin's single-cell framework
+```
+
+## Pathway enrichment
+
+Use any of your pathway analysis tools.
+
+## Single-cell CNV estimation
+
+<https://github.com/broadinstitute/inferCNV/wiki>
+<https://www.nature.com/articles/s41587-020-00795-2> CopyKAT
+
+```{r cnv}
+library(infercnv)
+```
+
+## Cell-cell communication
+
+I use cellphonedb, which is gene co-expression based.<https://github.com/Teichlab/cellphonedb>
+
+## Gene regulatory network analysis
+
+<https://github.com/aertslab/SCENIC>
+
+```{r grn}
+library(SCENIC)
+```
