@@ -1,0 +1,115 @@
+---
+title: "analysis_pipeline_scwat_vwat_skm"
+output: html_document
+date: "2022-11-02"
+---
+
+`module load r/4.0.4`
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+.libPaths("~/data-lab5/R/x86_64-pc-linux-gnu-library/4.0")
+library(colorout) # to highlight error message
+library(qs) # quickly saving and reading objects to and from disk
+library(readxl)
+analysis_dir <- "~/data-lab5/metabolism/scMetab1/r_analysis"
+setwd(analysis_dir)
+
+gg_color_hue <- function(n) {
+    hues = seq(15, 375, length = n + 1)
+    hcl(h = hues, l = 65, c = 100)[1:n]
+}
+## 22 top-level cell types
+## old myofibroblast is smooth muscle
+annotation_colors <- list(cell_type = c(ASC = "#E41A1C", FAP = "#CC2731", `FAP_Sca1-` = "#B53546", Satellite = "#9D425B", Fibroblast = "#CDA02C", Tenocyte = "#F87B0B", B = "#4A72A6", DC = "#3B87A3", Neutrophil = "#3E8E93", ILC = "#419583", Macrophage = "#449C72", Mast = "#48A462", Monocyte = "#4BAB52", NK = "#52A750", Plasma = "#5D995D", `T` = "#688B6A", Muscle_Fiber = "#E27699", Smooth_Muscle = "#F781BF", Adipocyte = "#F78184", EC = "#C88DAC", Pericyte = "#C78DC8", Epi = "#C88D8F", Epididymis = "#B093A2", Glial = "#999999", Fast_myonuclei = "#865070", Slow_myonuclei = "#DC6E37", MTJ_myonuclei = "#EA7521", Unidentified_myonuclei = "#F87B0B", NMJ_myonuclei = "#FF8703", immune = "#475F49", lymph = "#2E368F", myeloid = "#459C73"), tissue = c(scWAT = "#D95F02", vWAT = "#7570B3", SM = "#1B9E77"), pheno = c(SC = "#B9DBF4", SH = "#F2B342", TC = "#155289", TH = "#E7872B"), tissue_collection_day = c(D1 = "#FBB4AE", D2 = "#B3CDE3", D3 = "#CCEBC5", D4 = "#DECBE4", D5 = "#FED9A6", D6 = "#FFFFCC"), tissue_collection_time = c(morning = "#B3E2CD", noon = "#CBD5E8"), diet = c(HFD = "#E41A1C", Standard = "#377EB8"), exercise = c(training = "#4DAF4A", sedentary = "#984EA3"), CD45_selection = c(pos = "white", neg = "black", all = "gray"), group = c(Stem = "#FF0000", Connective = "#A52A2A", Immune = "#5F9EA0", Muscle = "#FF1493", Other = "#808080"), effect = c(up = gg_color_hue(2)[1], dn = gg_color_hue(2)[2]), deg_type_effect = c(diet_dn = "#795AA1", diet_up = "#F95A21", train_c_dn = "#0B29C4", train_c_up = "#8A2945", train_h_dn = "#744495", train_h_up = "#F34416"), dataset = c(This_study = "#E7298A", Rajbhandari_et_al_SNAP_seq = "#66A61E", Rajbhandari_et_al_scRNA_seq_SVF = "#E6AB02", Dos_Santos_et_al = "#A6761D"))
+```
+
+## Generating count matrices using cellranger 4.0.0 & refdata-gex-mm10-2020-A
+
+`cd ~/pub14/190524KelA_novaseq/10x-4042H/mkfastq_BauerCore`
+`cat -n README_190524KelA_D.txt`
+`sed -n 7,25p README_190524KelA_D.txt | sed 's/\t/,/g' - > cellranger_count_input.csv`
+`wc -l cellranger_count_input.csv`
+NOTE: may need to modify the fastq path in the slurm file.
+`sbatch --array=1-19 ~/sc_count_array_cluster_v2.slurm ~/pub14/190524KelA_novaseq/10x-4042H/mkfastq_BauerCore/cellranger_count_input.csv mouse scRNA`
+
+`cd ~/pub14/190524KelA_novaseq/10x-4053H/mkfastq_BauerCore`
+`cat -n README_190524KelA_F.txt`
+`sed -n 7,25p README_190524KelA_F.txt | sed 's/\t/,/g' - > cellranger_count_input.csv`
+`wc -l cellranger_count_input.csv`
+NOTE: may need to modify the fastq path in the slurm file.
+`sbatch --array=1-19 ~/sc_count_array_cluster_v2.slurm ~/pub14/190524KelA_novaseq/10x-4053H/mkfastq_BauerCore/cellranger_count_input.csv mouse scRNA`
+
+`cd ~/pub14/190524KelA_novaseq/10x-4054H/mkfastq_BauerCore`
+`cat -n README_190524KelA_E.txt`
+`sed -n 8,26p README_190524KelA_E.txt | sed 's/\t/,/g' - > cellranger_count_input.csv`
+`wc -l cellranger_count_input.csv`
+NOTE: may need to modify the fastq path in the slurm file.
+`sbatch --array=1-19 ~/sc_count_array_cluster_v2.slurm ~/pub14/190524KelA_novaseq/10x-4054H/mkfastq_BauerCore/cellranger_count_input.csv mouse scRNA`
+
+## Diagnostic plotting, decontaminating ambient RNAs, filtering for good-quality cells, data normalization, and doublet removal
+
+```{r soupx_seurat_doubletfinder, echo=FALSE}
+source("scripts/cellranger_metrics.R")
+cellranger_metrics(cellranger_input_file = "three_tissue_cellranger_input_file.txt", target_folder = paste0(analysis_dir, "/rdata"))
+source("scripts/sample_level_diagnostic_plot.R")
+sample_level_diagnostic_plot(cellranger_input_file = "three_tissue_cellranger_input_file.txt", species = "mouse", norm_mode = "sctransform", target_folder = paste0(analysis_dir, "/plots"))
+source("scripts/find.pK.noPlot.R")
+source("scripts/sample_level_processing.R")
+sample_level_process(cellranger_input_file = "three_tissue_cellranger_input_file.txt", species = "mouse", soupx_b = TRUE, soupx_mode = "fixed_0.2", seurat_filt_b = TRUE, nfeature_low = 200, nfeature_high = 6000, ncount_low = 500, per_mt_high = 30, norm_mode = "sctransform", target_folder = paste0(analysis_dir, "/rdata"))
+```
+NOTE: Remove three libraries due to quality issues (D19-5431, D19-5443 and D19-5462)
+
+## Sample clustering based on pseudobulk gene expression profiles
+
+```{r pseudobulk, echo=FALSE}
+pheno_df <- as.data.frame(read_excel(paste0(analysis_dir, "/TableZ1.scRNA_sequencing_sample_metrics.xlsx"), sheet = 1, range = "A1:G43"))
+rownames(pheno_df) <- pheno_df$Library
+pheno_df <- pheno_df[, -1]
+colnames(pheno_df) <- c("pooled_mouse_id", "tissue_collection_day", "tissue_collection_time", "diet", "exercise", "tissue")
+pheno_df$tissue_collection_time <- ifelse(pheno_df$tissue_collection_time == "8am-9am", "morning", "noon")
+pheno_df$pheno <- gsub("_.*", "", pheno_df$pooled_mouse_id)
+pheno_df$pheno <- factor(pheno_df$pheno, levels = c("SC", "TC", "SH", "TH"))
+source("scripts/sample_level_pseudobulk_clustering.R")
+sample_level_pseudobulk_cluster(input_file_directory = paste0(analysis_dir, "/rdata/doubletFinder/"), target_folder = paste0(analysis_dir, "/plots/"), pheno_df = pheno_df, pheno_colors = annotation_colors)
+```
+
+## Merging all the samples or tissue-specific samples together
+
+Refer to Nature Communication "The art of using t-SNE for single-cell transcriptomics" for effective preprocessing and processing steps.
+
+Sequencing depth normalization: multiply by 1 million for read counts, but multiply by the median sequencing depth across all n cells in the data set for UMI counts, because multiplying by 1 million can strongly distort the data after the subsequent log normalization.
+
+Standardization: not desirable from a theoretical point of view, however, in some data sets standardization yields a stronger separation between some clusters.
+
+PCA: a fixed value of 50.
+
+t-SNE: FIt-SNE; for PCA initialisation, divide the first two PCs by the standard deviation of PC1 and multiply them by 0.0001; setting learning rate to n/12 ensures good convergence; perplexity should be left at the default value 30 for very large data sets, but can be combined with n/100 for smaller data sets; exaggeration can be increased to ~4 for very large data sets, but is not needed for smaller data sets. Use n>>100,000 as the cutoff to determine very large data sets.
+
+NOTE that t-SNE result can be arbitrarily rotated and flipped as this does not change the distances between points. Caveat: it should not be stretched horizontally or vertically.
+
+```{r atlas, echo=FALSE}
+source("scripts/sample_integration.R")
+ample_integration(input_file_list = paste0(analysis_dir, "/rdata/doubletFinder/", rownames(pheno_df), ".rds"), target_folder = paste0(analysis_dir), integration_method = "merge", df_name = "scwat_vwat_skm", species = "mouse", norm_mode = "regular", nthreads = 32, rm_prolif = TRUE, mt_cutoff = 10)
+for (temp.tissue in unique(pheno_df$tissue)) {
+  sample_integration(input_file_list = paste0(analysis_dir, "/rdata/doubletFinder/", rownames(pheno_df[pheno_df$tissue == temp.tissue,]), ".rds"), target_folder = paste0(analysis_dir), integration_method = "merge", df_name = temp.tissue, species = "mouse", norm_mode = "regular", nthreads = 16, rm_prolif = TRUE, mt_cutoff = 10)
+}
+```
+
+## Adding metadata and metadata plotting for the atlas and tissue maps
+
+```{r metadata_plot, echo=FALSE}
+source("scripts/add_metadata.R")
+for (temp.df_name in c("scwat_vwat_skm", "scWAT", "vWAT", "SM")) {
+  add_metadata(object_path = paste0(analysis_dir, "/rdata/", temp.df_name, "_combined.qs"), metadata = pheno_df)
+}
+source("scripts/feature_plot.R")
+for (temp.df_name in c("scmetab2", "scWAT", "vWAT", "SM")) {
+  for (temp.reduction in c("tsne", "umap")) {
+    for (temp.pheno in c("pooled_mouse_id", "tissue", "pheno")) {
+      feature_plot(object_path = paste0(analysis_dir, "/rdata/", temp.df_name, "_combined.qs"), feature = temp.pheno, var_class = "categorical", reduction = temp.reduction, feature_colors = annotation_colors[[temp.pheno]], target_folder = paste0(analysis_dir, "/plots/"), file_format = "png", legend = "include")
+    }
+  }
+}
+rm(list = ls(pattern = "^temp"))
+```
